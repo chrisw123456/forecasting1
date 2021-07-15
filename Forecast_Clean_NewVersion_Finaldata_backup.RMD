@@ -1,0 +1,1092 @@
+---
+title: "FORECASTING SCRIPT"
+author: "Chris"
+date: "6/12/2021"
+output: html_document
+---
+```{r install packages used ,eval=FALSE}
+
+
+#IRkernel::installspec()
+install.packages(c("IRkernel", "readxl","tidyverse","tibble","janitor","forecast","stats",
+                 "lubridate","fpp2","zoo","dplyr","corrplot","PerformanceAnalytics","vars",
+                "ggplot2","scales","reshape2",
+                 "forcats","timetk","tidyquant","tibbletime","cowplot","recipes","rsample",
+                 "devtools","yardstick","TSstudio","tfruns","easypackages","Rfast","caret",
+                 "lamW","greybox","smooth","signal","tseries","glue","magrittr","astsa","writexl",
+                 "nnfor","RODBC","reshape","xgboost","modeltime","tidymodels","plotly","NCmisc"))
+
+devtools::install_github("josephsdavid/tswgewrapped", build_vignettes = FALSE)
+```
+
+```{r load packages used, echo=FALSE}
+
+library(easypackages)
+libraries("IRkernel", "readxl","tidyverse","tibble","janitor","forecast","stats",
+                 "lubridate","fpp2","zoo","dplyr","corrplot","PerformanceAnalytics","vars",
+                 "ggplot2","scales","reshape2",
+                 "forcats","timetk","tidyquant","tibbletime","cowplot","recipes","rsample",
+                 "devtools","yardstick","TSstudio","tfruns","easypackages","Rfast","caret",
+                 "lamW","greybox","smooth","signal","tseries","glue","magrittr","astsa",
+          "writexl","tswgewrapped","quantmod","data.table","nnfor","RODBC","reshape","xgboost","modeltime","tidymodels"
+          ,"plotly","NCmisc")
+
+
+```
+
+```{r}
+library(odbc)
+library(DBI)
+con <- DBI::dbConnect(odbc::odbc(),
+                      Driver   = "SQL Server",
+                      Server   = "usodcvsql0255",
+                      Database = "NAO_PMO_Analytics",
+                     
+                      Port     = 1433)
+
+
+t <- dbReadTable(con, "zzz_Forecast_Input")
+
+DBI::dbDisconnect(con)
+```
+
+
+```{r Long Data Manipulation,echo=FALSE}
+#
+# new solution
+library(tidyr)
+library(dplyr)
+long_dataset <- t
+
+#long_dataset <- read_excel("FieldOpsMMVolumedatafromJan2019.xlsx") 
+
+#colnames(long_dataset)[3] <- "Sub.Product"
+
+#remove UNASSIGNED subproducts
+long_dataset <-long_dataset[!grepl("UNASSIGNED", long_dataset$Sub.Product),]
+
+long_dataset$Date <- as.character(long_dataset$Date) %>%
+  lubridate::ymd()
+
+# this needs to be changed if date exceeds 2021-07
+long_dataset <- long_dataset %>% filter(Date < "2021-08-01")
+
+# combine subproduct and product columns, because my whole code is based off unique subproducts
+long_dataset$product_subproduct <- paste(long_dataset$Product, long_dataset$Sub.Product,sep="_and_")
+
+# remove columns 2,3 product subproduct
+long_dataset <- long_dataset[ -c(2,3) ]
+
+library(dplyr)
+long_dataset<-long_dataset %>%
+     group_by(product_subproduct) %>%
+     filter(n() >= 22) %>%
+     ungroup
+# long_dataset$Date <- paste(long_dataset$Date,"01",sep="") %>% as.character() %>%
+#   lubridate::ymd()
+
+# automate this so I delete anything with less than 20 observations
+
+# long_dataset<-long_dataset[!(long_dataset$product_subproduct=="Professional Services_and_Change" | long_dataset$product_subproduct=="Professional Services_and_Change"),]
+long_dataset %>%
+   group_by(product_subproduct) %>%
+   slice_max(n = 1, order_by = Date) %>%
+   ungroup %>%
+   pull(Date) %>%
+   min -> Min_date
+
+#1 automated this
+# Find max date of both by Scenario and find the lowest of the two)
+
+
+long_dataset <-long_dataset %>%
+  complete(Date = seq.Date(from = min(Date), to = as.Date(Min_date), by = 'month'), 
+           nesting(Scenario,product_subproduct), fill = list(Volumes = 0))
+
+# long_dataset <- long_dataset %>%
+#   group_by(product_subproduct)  %>%
+#   mutate(Volumes = replace(Volumes, Volumes == 0,
+#                            mean(Volumes[Volumes != 0], na.rm = TRUE))) %>%
+#   ungroup
+
+
+long_dataset <- long_dataset %>%
+     group_by(product_subproduct)  %>%
+     mutate(Volumes = replace(Volumes, Volumes == 0, 
+         mean(Volumes[Volumes != 0  & 
+    between(Date, as.Date("2019-01-01"), as.Date("2020-12-01"))], 
+         na.rm = TRUE))) 
+
+
+long_dataset <- dplyr::group_by(long_dataset,long_dataset$Scenario) %>%
+  complete(Date = seq.Date(from = max(Date), to = as.Date('2022-12-01'), by = 'month'), 
+           nesting(Scenario,product_subproduct), fill = list(Volumes = 0))
+
+long_dataset <- dplyr::arrange(long_dataset,long_dataset$Date)
+long_dataset <- dplyr::arrange(long_dataset,long_dataset$product_subproduct)
+long_dataset <- dplyr::ungroup(long_dataset)
+long_dataset <- long_dataset[ -c(1) ]
+
+long_dataset <- dplyr::arrange(long_dataset,long_dataset$Scenario)
+un1 <- unique(long_dataset$Scenario)
+for(i in seq_along(un1)) 
+     assign(paste0('scenario', i), subset(long_dataset, Scenario == un1[i]))
+
+
+# how to automate this
+### where code changes
+
+#x<-split(long_dataset, long_dataset$Scenario) %>% global2env
+
+# this is the hard code needed to be done scenario1=x[[i]] where i = each new scenario
+#scenario1 <- x[[1]] 
+#scenario2 <- x[[2]]
+
+# debug2 <-  subset(scenario2, scenario2$product_subproduct == "Converged Services_and_Change")
+# debug2 <- debug2 %>%
+#   group_by(product_subproduct)  %>%
+#   mutate(Volumes = replace(Volumes, Volumes == 0,
+#                            mean(Volumes[Volumes != 0], na.rm = TRUE))) %>%
+#   ungroup
+
+## data manipulation for modeling/output
+export_df_s1 <- split(scenario1[1:4], scenario1[3])
+
+ # Creation of data frames based off UNIQUE Sub.ProductS 
+dummy_list_s1 <- split(scenario1[1:4], scenario1[3]) %>% lapply( function(x) x[(names(x) %in% c("Date", "Volumes"))])
+dummy_list_s1 <-  lapply(dummy_list_s1, function(x) { x["Date"] <- NULL; x })
+
+list_dfs_s1 <- list()
+for (i in 1:length(unique(scenario1$product_subproduct))) {
+  #assign(paste0("df", i), as.data.frame(dummy_list[[i]]))
+  list_dfs_s1 <-append(list_dfs_s1,dummy_list_s1[[i]])
+}
+
+combined_dfs_s1 <- Reduce(function(x, y) merge(x, y, all = TRUE,  by='Date'), list(list_dfs_s1))
+
+#testing <-lapply(list_dfs, function(x) x[sapply(x, length) < 47])
+
+list_ts_s1 <- lapply(list_dfs_s1, function(t) ts(t,start=c(2019,1),end=c(2021,5), frequency = 12)) %>%
+                  lapply( function(t) ts_split(t,sample.out=(5)))    # creates my train test split
+list_ts_s1 <- do.call("rbind", list_ts_s1)  #Creates a list of time series
+
+
+
+```
+
+```{r EDA,eval=FALSE}
+# data viz purposes only
+list_long_ts_s1 <- lapply(list_dfs_s1, function(t) ts(t,start=c(2019,1),end=c(2022,12), frequency = 12))
+# interactive plots, you can click on the filters for Sub.Products
+ggplotly(ggplot(scenario1,aes(x=Date,y=Volumes,color=product_subproduct))+geom_point())
+
+ggplotly(ggplot(scenario1,aes(x=Date,y=Volumes,color=product_subproduct)) +
+  geom_line())
+
+
+for (i in 1:(length(list_long_ts_s1))){
+  print(ggseasonplot(list_long_ts_s1[[i]], year.labels=TRUE, year.labels.left=TRUE) +
+  ylab("actuals") +
+  ggtitle("Seasonal Plot: Training Data"))
+}
+
+
+# plot train only
+for (i in 1:(length(list_ts_s1)/2)){
+  print(autoplot(list_ts_s1[[i]]))
+}
+
+# use moving averages decompose TS -> seasonal, trend, random components
+for (i in 1:(length(list_ts_s1)/2)){
+  print(ts_decompose(list_ts_s1[[i]]))
+}
+
+# training seasonal plot
+for (i in 1:(length(list_ts_s1)/2)){
+  print(ggseasonplot(list_ts_s1[[i]], year.labels=TRUE, year.labels.left=TRUE) +
+  ylab("actuals") +
+  ggtitle("Seasonal Plot: Training Data"))
+}
+
+# training data lags
+for (i in 1:(length(list_ts_s1)/2)){
+  print(gglagplot(list_ts_s1[[i]]))
+}
+
+```
+
+```{r EDA.2 ,eval=FALSE}
+# plot train/test together
+
+for (i in 1:(length(list_ts_s1)/2)){
+  print(autoplot(list_ts_s1[[i]]) +
+  autolayer(list_ts_s1[[i+10]]))
+}
+
+```
+
+```{r Stationary Tests ,eval=FALSE}
+
+# looping through training data only
+# Checking autocorrelations (acf), lags should fall between blue lines
+# Various Stationary tests
+
+
+# Checking to see if lags have correlation
+for (i in 1:(length(list_ts_s1)/2)){
+  acf(list_ts_s1[[i]])
+}
+
+# We want higher p-value
+for (i in 1:(length(list_ts_s1)/2)){
+   print( Box.test(list_ts_s1[[i]],type="Ljung-Box",fitdf = 0))
+}
+
+# we want low pvalue < 0.5
+for (i in 1:(length(list_ts_s1)/2)){
+   print(adf.test(list_ts_s1[[i]],alternative = "stationary"))
+}
+
+# We want low pvalue <0.5
+for (i in 1:(length(list_ts_s1)/2)){
+   print(kpss.test((list_ts_s1[[i]]),null="Trend"))
+}
+
+
+```
+
+```{r Manual SES Tuning ,eval=FALSE}
+# Manual Tuning Model       Just change list_ts_s1[x] 
+# find best value of alpha by RMSE training validate on test for best model
+
+alpha <- seq(.01, .99, by = .01)
+RMSE <- NA
+#best <- vector('list', length(list_ts_s1)/2)
+
+
+for(i in seq_along(alpha)) {
+fit <- ses(list_ts_s1[[4]], alpha = alpha[i], h = 24)
+RMSE[i] <- forecast::accuracy(fit,list_ts_s1[[8]])[2,2]}
+  
+
+print(RMSE %>% min())
+(which.min(RMSE))
+
+
+```
+
+```{r Simple Expo Smoothing}
+
+c1_simple_expo_smooth0 <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) forecast::forecast(ses(x,h=24))) 
+c1_simple_expo_smooth0 <- lapply(c1_simple_expo_smooth0, "[",  c("mean"))
+
+# n1 <- seq(0.1, 0.99, by = 0.1)
+# out<- lapply(seq_along(n1), function(i) {
+#     c1_simple_expo_smooth <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) 
+#            forecast::forecast(ses(x,h=24,alpha = n1[i])))
+#     c1_simple_expo_smooth <- lapply(c1_simple_expo_smooth, "[", "mean")
+#     assign(paste0("c1_simple_expo_smooth", i), c1_simple_expo_smooth, envir = .GlobalEnv)
+#     c1_simple_expo_smooth})
+
+```
+
+
+```{r Holt's Linear Trend}
+c1_add_holtlineartrend <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) forecast::forecast(holt(x,h=24,phi=0.9)))
+c1_add_holtlineartrend <- lapply(c1_add_holtlineartrend, "[",  c("mean"))
+
+c1_add_holtlineartrenddamp <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) forecast::forecast(holt(x,h=24,damped=TRUE,phi=0.9)))
+c1_add_holtlineartrenddamp <- lapply(c1_add_holtlineartrenddamp, "[",  c("mean"))
+```
+
+
+```{r Triple Exponential Smoothing AAA with ets}
+# error trend seasonality 10 models here
+c1_AAA_ets <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) forecast::forecast(ets(x,model="AAA",opt.crit=c("mse"),ic=c("aicc")),h=24))
+c1_AAA_ets <- lapply(c1_AAA_ets, "[",  c("mean"))
+
+c1_MAA_ets <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) forecast::forecast(ets(x,model="MAA",opt.crit=c("mse"),ic=c("aicc")),h=24))
+c1_MAA_ets <- lapply(c1_MAA_ets, "[",  c("mean"))
+
+c1_MAM_ets <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) forecast::forecast(ets(x,model="MAM",opt.crit=c("mse"),ic=c("aicc")),h=24))
+c1_MAM_ets <- lapply(c1_MAM_ets, "[",  c("mean"))
+
+c1_MMM_ets <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) forecast::forecast(ets(x,model="MMM",opt.crit=c("mse"),ic=c("aicc")),h=24))
+c1_MMM_ets <- lapply(c1_MMM_ets, "[",  c("mean"))
+
+c1_ANA_ets <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) forecast::forecast(ets(x,model="ANA",opt.crit=c("mse"),ic=c("aicc")),h=24))
+c1_ANA_ets <- lapply(c1_ANA_ets, "[",  c("mean"))
+
+c1_MNA_ets <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) forecast::forecast(ets(x,model="MNA",opt.crit=c("mse"),ic=c("aicc")),h=24))
+c1_MNA_ets <- lapply(c1_MNA_ets, "[",  c("mean"))
+
+c1_MNM_ets <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) forecast::forecast(ets(x,model="MNM",opt.crit=c("mse"),ic=c("aicc")),h=24))
+c1_MNM_ets <- lapply(c1_MNM_ets, "[",  c("mean"))
+
+c1_AAN_ets <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) forecast::forecast(ets(x,model="AAN",opt.crit=c("mse"),ic=c("aicc")),h=24))
+c1_AAN_ets <- lapply(c1_AAN_ets, "[",  c("mean"))
+
+c1_MAN_ets <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) forecast::forecast(ets(x,model="MAN",opt.crit=c("mse"),ic=c("aicc")),h=24))
+c1_MAN_ets <- lapply(c1_MAN_ets, "[",  c("mean"))
+
+c1_MMN_ets <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) forecast::forecast(ets(x,model="MMN",opt.crit=c("mse"),ic=c("aicc")),h=24))
+c1_MMN_ets <- lapply(c1_MMN_ets, "[",  c("mean"))
+
+```
+
+```{r HoltWinters() grid search (manual tuning of alpha,beta,gamma),eval=FALSE}
+# node stack overflow error???????????????
+# sometimes it works on this computer, WORKS ON MY OTHER COMPUTER
+hwts <- ts(list_dfs[[3]],start=c(2019,1),end=c(2021,6),frequency=12)
+
+hw_grid <- ts_grid(hwts, 
+                   model = "HoltWinters",
+                   periods = 2,
+                   window_space = 1,
+                   window_test = 3,
+                   optim = c("RMSE"),
+                   parallel = TRUE,
+                   n.cores = 8,
+                   hyper_params = list(alpha = seq(0.01,1,0.1),
+                                       beta = seq(0.01,1,0.1),
+                                       gamma = seq(0.01,1,0.1)))
+# df1 a,b,g = .101, .001 .9001
+# df2 = .301 .701 0
+# df3 .101 .401 .9001
+# df4  .901 .201 .9001
+
+                                       
+plot_grid(hw_grid, type = "3D")
+
+```
+
+```{r Double Expo S additive auto with HW}
+
+c1_double_holt_additive <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x)
+  forecast::forecast( HoltWinters(x,gamma=FALSE,seasonal="additive"),h=24))
+
+c1_double_holt_additive <- lapply(c1_double_holt_additive, "[",  c("mean"))
+
+# tuning check
+#forecast::accuracy(forecast::forecast(HoltWinters(list_ts_s1[[4]],gamma=FALSE,seasonal="additive"),h=24),list_ts_s1[[8]])
+
+```
+
+
+
+```{r Triple Expo Add with HoltWinters,echo=FALSE}
+n1 <- seq(0.1, 0.99, by = .15)
+n2 <- seq(0.1, 0.99, by = .15)
+n3 <- seq(0.1, 0.99, by = .15)
+
+dat_n <- expand.grid(n1 = n1, n2= n2, n3 = n3) 
+out<- lapply(seq_len(nrow(dat_n)), function(i) {
+   c1_triple_holtwinters_additive <- lapply(list_ts_s1[1: 
+(length(list_ts_s1)/2)], function(x) 
+       forecast::forecast(HoltWinters(x,seasonal = "additive",alpha = 
+dat_n$n1[i],beta=dat_n$n2[i],gamma=dat_n$n3[i])))
+    c1_triple_holtwinters_additive <- 
+ lapply(c1_triple_holtwinters_additive, "[", "mean")
+  assign(paste0("c1_triple_holtwinters_additive", i), 
+c1_triple_holtwinters_additive, envir = .GlobalEnv)
+ c1_triple_holtwinters_additive})
+#c1_simple_expo_smooth10 <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) forecast::forecast(ses(x,h=24,alpha=0.1))) 
+#c1_simple_expo_smooth10 <- lapply(c1_simple_expo_smooth1, "[",  c("mean"))
+
+
+###########
+c1_triple_holtwinters_additive0 <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x)
+  forecast::forecast( HoltWinters(x,seasonal="additive"),h=24))
+
+c1_triple_holtwinters_additive0 <- lapply(c1_triple_holtwinters_additive0, "[",  c("mean"))
+
+
+
+#forecast::accuracy(forecast::forecast(HoltWinters(list_ts_s1[[3]],seasonal="additive"),h=24),list_ts_s1[[13]])
+
+# Manual tuning test
+#forecast::accuracy(forecast::forecast(HoltWinters(list_ts_s1[[3]],seasonal="additive"),h=24),list_ts_s1[[7]])
+
+
+```
+
+
+```{r Triple Expo Mult HoltWinters}
+
+n1 <- seq(0.1, 0.99, by = .15)
+n2 <- seq(0.1, 0.99, by = .15)
+n3 <- seq(0.1, 0.99, by = .15)
+
+dat_n <- expand.grid(n1 = n1, n2= n2, n3 = n3) 
+out<- lapply(seq_len(nrow(dat_n)), function(i) {
+   c1_triple_holtwinters_multiplicative <- lapply(list_ts_s1[1: 
+(length(list_ts_s1)/2)], function(x) 
+       forecast::forecast(HoltWinters(x,seasonal = "multiplicative",alpha = 
+dat_n$n1[i],beta=dat_n$n2[i],gamma=dat_n$n3[i])))
+    c1_triple_holtwinters_multiplicative <- 
+ lapply(c1_triple_holtwinters_multiplicative, "[", "mean")
+  assign(paste0("c1_triple_holtwinters_multiplicative", i), 
+c1_triple_holtwinters_multiplicative, envir = .GlobalEnv)
+ c1_triple_holtwinters_multiplicative})
+
+
+
+#
+c1_triple_holtwinters_multiplicative0 <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x)
+  forecast::forecast( HoltWinters(x,seasonal="multiplicative"),h=24))
+
+c1_triple_holtwinters_multiplicative0 <- lapply(c1_triple_holtwinters_multiplicative0, "[",  c("mean"))
+
+
+
+# tune check
+#forecast::accuracy(forecast::forecast(HoltWinters(list_ts_s1[[4]],seasonal="multiplicative",alpha=.1,beta=.1,gamma=.2),h=24),list_ts_s1[[8]])
+
+```
+
+```{r Manual Selection of Arima ,eval=FALSE}
+# tuning ARIMA 213
+methods <- list(arima1 = list(method = "Arima",
+                              method_arg = list(order = c(0,0,0)),
+                              notes = "ARIMA(0,0,0)"),
+               arima2 = list(method = "Arima",
+                              method_arg = list(order = c(0,0,1)),
+                              notes = "ARIMA(0,0,1)"),
+                arima3 = list(method = "Arima",
+                              method_arg = list(order = c(0,1,1)),
+                              notes = "ARIMA(0,1,1)"),
+               arima4 = list(method = "Arima",
+                              method_arg = list(order = c(1,1,1)),
+                              notes = "ARIMA(1,1,1)"),
+                arima5 = list(method = "Arima",
+                              method_arg = list(order = c(1,1,0)),
+                              notes = "ARIMA(1,1,0)"),
+                arima6 = list(method = "Arima",
+                              method_arg = list(order = c(1,0,0)),
+                              notes = "ARIMA(1,0,0)"),
+                arima7 = list(method = "Arima",
+                              method_arg = list(order = c(2,1,0)),
+                              notes = "ARIMA(2,1,0)"),
+                arima8 = list(method = "Arima",
+                              method_arg = list(order = c(2,1,2)),
+                              notes = "ARIMA(2,1,2)"),
+                arima9 = list(method = "Arima",
+                              method_arg = list(order = c(2,2,3)),
+                              notes = "ARIMA(2,2,3)"),
+                arima10 = list(method = "Arima",
+                              method_arg = list(order = c(1,1,3)),
+                              notes = "ARIMA(1,1,3)"),
+                arima11 = list(method = "Arima",
+                              method_arg = list(order = c(1,0,3)),
+                              notes = "ARIMA(1,0,3)"),
+                arima12 = list(method = "Arima",
+                              method_arg = list(order = c(2,0,3)),
+                              notes = "ARIMA(2,0,3)"),
+               arima13 = list(method = "Arima",
+                              method_arg = list(order = c(2,1,3)),
+                              notes = "ARIMA(2,1,3)"),
+                arima14 = list(method = "Arima",
+                              method_arg = list(order = c(2,1,1)),
+                              notes = "ARIMA(2,1,1)"),
+                arima15 = list(method = "Arima",
+                              method_arg = list(order = c(2,2,2)),
+                              notes = "ARIMA(2,2,2)"),
+                arima16 = list(method = "Arima",
+                              method_arg = list(order = c(0,1,2)),
+                              notes = "ARIMA(0,1,2)")
+               )
+methods
+
+md <- train_model(input = list_ts_s1[[1]],
+                  methods = methods,
+                  train_method = list(partitions = 1,
+                                      sample.out = 5,
+                                      space=1),
+                  horizon = 24,
+                  error = "RMSE")
+
+plot_error(md,error="RMSE")
+#md$forecast # 1 and 5
+md$leaderboard
+
+
+```
+
+```{r ARIMA}
+#1
+
+
+c1_autoregressive_integratedmovingaverage <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x)
+  forecast::forecast( auto.arima(x,ic=c("aicc")),h=24))
+
+c1_autoregressive_integratedmovingaverage <- lapply(c1_autoregressive_integratedmovingaverage, "[",  c("mean"))
+
+
+
+# #2
+c1_autoregressive_integratedmovingaverage_1 <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x)
+  forecast::forecast( Arima(x,order=c(0,0,0)),ic=c("aicc"),h=24))
+
+c1_autoregressive_integratedmovingaverage_1 <- lapply(c1_autoregressive_integratedmovingaverage_1, "[",  c("mean"))
+
+
+#3
+c1_autoregressive_integratedmovingaverage_2 <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x)
+  forecast::forecast( Arima(x,order=c(0,0,1)),h=24))
+
+c1_autoregressive_integratedmovingaverage_2 <- lapply(c1_autoregressive_integratedmovingaverage_2, "[",  c("mean"))
+
+## 4
+
+c1_autoregressive_integratedmovingaverage_3 <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x)
+  forecast::forecast( Arima(x,order=c(0,1,1)),h=24))
+
+c1_autoregressive_integratedmovingaverage_3 <- lapply(c1_autoregressive_integratedmovingaverage_3, "[",  c("mean"))
+
+##5
+
+c1_autoregressive_integratedmovingaverage_4 <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x)
+  forecast::forecast( Arima(x,order=c(1,0,3)),h=24))
+
+c1_autoregressive_integratedmovingaverage_4 <- lapply(c1_autoregressive_integratedmovingaverage_4, "[",  c("mean"))
+
+
+
+
+## 19
+c1_autoregressive_integratedmovingaverage_5 <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x)
+  forecast::forecast( Arima(x,order=c(0,1,2)),h=24))
+
+c1_autoregressive_integratedmovingaverage_5 <- lapply(c1_autoregressive_integratedmovingaverage_5, "[",  c("mean"))
+
+
+
+
+```
+
+
+```{r TSLM }
+# tslm season+trend
+c1_linearmodel_seasontrend <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x)
+ forecast::forecast(tslm(x~season+trend),h=24))
+
+c1_linearmodel_seasontrend <- lapply(c1_linearmodel_seasontrend, "[",  c("mean"))
+
+# tslm trend
+c1_linearmodel_trend <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x)
+ forecast::forecast(tslm(x~trend),h=24))
+
+c1_linearmodel_trend <- lapply(c1_linearmodel_trend, "[",  c("mean"))
+
+```
+
+```{r Cubic Splines}
+
+c1_cubicspline1 <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) forecast::splinef(x,h=24,method=c("mle")))
+c1_cubicspline1 <- lapply(c1_cubicspline1, "[",  c("mean"))
+
+c1_cubicspline2 <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) forecast::splinef(x,h=24,method=c("gcv")))
+c1_cubicspline2 <- lapply(c1_cubicspline2, "[",  c("mean"))
+```
+
+```{r Dynamic Harmonic Regression}
+
+c1_dynamicharmonicregression <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x)
+ forecast::forecast( auto.arima(x, xreg = fourier(x, K =3),seasonal=FALSE, lambda=NULL)
+                     ,xreg=forecast::fourier(x, K=3, h=24)))
+
+c1_dynamicharmonicregression <- lapply(c1_dynamicharmonicregression, "[",  c("mean"))
+```
+
+```{r TBATS}
+
+c1_boxcoxtransform_armaerrors_trend_seasonal <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) forecast::forecast(tbats(x),h=24))
+c1_boxcoxtransform_armaerrors_trend_seasonal <- lapply(c1_boxcoxtransform_armaerrors_trend_seasonal, "[",  c("mean"))
+
+```
+
+```{r Neural Network}
+# nnetar
+c1_neuralnetwork1 <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) forecast::forecast(nnetar(x,lambda="auto"),h=24))
+c1_neuralnetwork1 <- lapply(c1_neuralnetwork1, "[",  c("mean"))
+
+c1_neuralnetwork2 <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) forecast::forecast(nnetar(x,lambda="auto",scale.inputs=TRUE),h=24))
+c1_neuralnetwork2 <- lapply(c1_neuralnetwork2, "[",  c("mean"))
+# different package nnfor
+# c1_neuralnetwork3 <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) forecast::forecast(nnfor::mlp(x),h=24))
+# c1_neuralnetwork3 <- lapply(c1_neuralnetwork3, "[",  c("mean"))
+# 
+# c1_neuralnetwork4 <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) forecast::forecast(nnfor::mlp(x,hd=c(10,5)),h=24))
+# c1_neuralnetwork4 <- lapply(c1_neuralnetwork4, "[",  c("mean"))
+# 
+# c1_neuralnetwork5 <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) 
+#   forecast::forecast(nnfor::mlp(x,hd=c(10,5),reps=5,comb="mean"),h=24))
+# c1_neuralnetwork5 <- lapply(c1_neuralnetwork5, "[",  c("mean"))
+# 
+# c1_neuralnetwork6<- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x) 
+#   forecast::forecast(nnfor::mlp(x,hd=c(10,5),reps=5,comb="mean",sel.lag=TRUE,
+#                                 det.type="auto"),h=24))
+# c1_neuralnetwork6 <- lapply(c1_neuralnetwork6, "[",  c("mean"))
+
+
+```
+
+
+```{r Tuning Sarima ,eval=FALSE}
+d=1
+D=1
+s=4
+
+for(p in 1:4)
+  {for(q in 1:4)
+    {for(P in 1:4)
+      {for(Q in 1:4)
+        {if(p+d+q+P+D+Q<=10)
+        {model<-forecast::Arima(y=(list_ts_s1[[2]]),order=c(p-1,d,q-1),seasonal=list(order=c(P-1,D,Q-1),period=s))
+        test<-Box.test(model$residuals,lag=log(length(model$residuals)))
+        sse=sum(model$residuals^2)
+        cat(p-1,d,q-1,P-1,D,Q-1, "AICC:",model$aicc,"SSE:",sse,'p-value:',test$p.value,'\n')
+  
+        }
+      }
+    }
+  }
+}
+
+d=2
+D=2
+s=4
+
+for(p in 1:4)
+  {for(q in 1:4)
+    {for(P in 1:4)
+      {for(Q in 1:4)
+        {if(p+d+q+P+D+Q<=10)
+        {model<-Arima(x=log(list_ts_s1[[2]]),order=c(p-1,d,q-1),seasonal=list(order=c(P-1,D,Q-1),period=s))
+        test<-Box.test(model$residuals,lag=log(length(model$residuals)))
+        sse=sum(model$residuals^2)
+        cat(p-1,d,q-1,P-1,D,Q-1, "AICC:",model$aicc,"SSE:",sse,'p-value:',test$p.value,'\n')
+  
+        }
+      }
+    }
+  }
+}
+
+```
+
+
+```{r SARIMA}
+
+n1 <- list(c(0,0,0),c(0,0,1),c(0,1,1),c(1,1,1),c(1,1,0),c(1,0,0),c(1,0,3),
+            c(1,1,3), c(0,1,2),c(1,1,2),c(2,0,0),c(2,0,3),c(2,1,0),c(2.1,1),c(2,1,2)
+            ,c(2,1,3),c(2,2,2),c(2,2,3),c(3,1,0),c(3,1,1))
+
+#n1 <- list(c(0,0,1),c(1,1,1), c(0,1,2),c(1,1,3),c(2,1,1),c(2,1,2),c(1,1,2))
+n2 <- list(c(0,1,0),c(1,0,0),c(1,1,0),c(1,1,1),c(0,0,1),c(0,1,1),c(1,0,1))
+dat_n <- expand.grid(n1 = n1, n2 = n2)
+
+#
+out <- lapply(seq_len(nrow(dat_n)), function(i) {
+      c1_sarima <- lapply(list_ts_s1[1:(length(list_ts_s1)/2)], function(x)  {
+         tryCatch({forecast::forecast(Arima(x, order = dat_n$n1[[i]],
+           seasonal=list(order = dat_n$n2[[i]],
+           period=2)),h=24)
+           }, error = function(err) return(data.frame(mean = NA_real_))
+           
+           )})
+      
+     c1_sarima <- lapply(c1_sarima, "[", "mean")
+     c1_sarima <- lapply(c1_sarima, function(x) if(all(is.na(x))) 0 else x)
+   assign(paste0("c1_sarima", i), c1_sarima, envir = .GlobalEnv)})
+    
+#v1 <- ls(pattern = '^c1_sarima\\d$'); rm(list = v1[sapply(mget(v1), function(x) lengths(x) != 4)])
+# 1 1 1 0 1 0
+
+# 
+# 
+
+
+
+```
+
+
+
+```{r Export List}
+
+lst1 <- do.call(Map, c(f = cbind, mget(ls(pattern = 'c1_'))))
+
+
+export_df1 <- Map(cbind, export_df_s1, lst1)
+
+
+out <- Map(function(x, y) {x[colnames(y)] <- sapply(y,  function(u) c(rep(0, nrow(x) - length(u)), u)); x}, export_df1, lst1)
+
+export_df1 <- bind_rows(out, .id = "Date")
+
+date <- scenario1$Date
+
+export_df1$Date <- date
+
+export_df1 <- export_df1 %>% separate(product_subproduct, c("Product", "Sub.Product"), "_and_")
+# 146 vars 480 obs
+
+```
+
+```{r}
+#scenario2
+
+export_df_s2 <- split(scenario2[1:4], scenario2[3])
+
+ # Creation of data frames based off UNIQUE Sub.ProductS 
+dummy_list_s2 <- split(scenario2[1:4], scenario2[3]) %>% lapply( function(x) x[(names(x) %in% c("Date", "Volumes"))])
+dummy_list_s2 <-  lapply(dummy_list_s2, function(x) { x["Date"] <- NULL; x })
+
+list_dfs_s2 <- list()
+for (i in 1:length(unique(scenario2$product_subproduct))) {
+  #assign(paste0("df", i), as.data.frame(dummy_list[[i]]))
+  list_dfs_s2 <-append(list_dfs_s2,dummy_list_s2[[i]])
+}
+
+combined_dfs_s2 <- Reduce(function(x, y) merge(x, y, all = TRUE,  by='Date'), list(list_dfs_s2))
+
+#testing <-lapply(list_dfs, function(x) x[sapply(x, length) < 47])
+
+list_ts_s2 <- lapply(list_dfs_s2, function(t) ts(t,start=c(2019,1),end=c(2021,7), frequency = 12)) %>%
+                  lapply( function(t) ts_split(t,sample.out=(7)))    # creates my train test split
+list_ts_s2 <- do.call("rbind", list_ts_s2)  #Creates a list of time series
+
+
+#
+c1_simple_expo_smooth0 <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x) forecast::forecast(ses(x,h=24))) 
+c1_simple_expo_smooth0 <- lapply(c1_simple_expo_smooth0, "[",  c("mean"))
+
+c1_add_holtlineartrend <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x) forecast::forecast(holt(x,h=24,phi=0.9)))
+c1_add_holtlineartrend <- lapply(c1_add_holtlineartrend, "[",  c("mean"))
+
+c1_add_holtlineartrenddamp <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x) forecast::forecast(holt(x,h=24,damped=TRUE,phi=0.9)))
+c1_add_holtlineartrenddamp <- lapply(c1_add_holtlineartrenddamp, "[",  c("mean"))
+
+c1_AAA_ets <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x) forecast::forecast(ets(x,model="AAA",opt.crit=c("mse"),ic=c("aicc")),h=24))
+c1_AAA_ets <- lapply(c1_AAA_ets, "[",  c("mean"))
+
+c1_MAA_ets <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x) forecast::forecast(ets(x,model="MAA",opt.crit=c("mse"),ic=c("aicc")),h=24))
+c1_MAA_ets <- lapply(c1_MAA_ets, "[",  c("mean"))
+
+c1_MAM_ets <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x) forecast::forecast(ets(x,model="MAM",opt.crit=c("mse"),ic=c("aicc")),h=24))
+c1_MAM_ets <- lapply(c1_MAM_ets, "[",  c("mean"))
+
+c1_MMM_ets <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x) forecast::forecast(ets(x,model="MMM",opt.crit=c("mse"),ic=c("aicc")),h=24))
+c1_MMM_ets <- lapply(c1_MMM_ets, "[",  c("mean"))
+
+c1_ANA_ets <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x) forecast::forecast(ets(x,model="ANA",opt.crit=c("mse"),ic=c("aicc")),h=24))
+c1_ANA_ets <- lapply(c1_ANA_ets, "[",  c("mean"))
+
+c1_MNA_ets <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x) forecast::forecast(ets(x,model="MNA",opt.crit=c("mse"),ic=c("aicc")),h=24))
+c1_MNA_ets <- lapply(c1_MNA_ets, "[",  c("mean"))
+
+c1_MNM_ets <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x) forecast::forecast(ets(x,model="MNM",opt.crit=c("mse"),ic=c("aicc")),h=24))
+c1_MNM_ets <- lapply(c1_MNM_ets, "[",  c("mean"))
+
+c1_AAN_ets <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x) forecast::forecast(ets(x,model="AAN",opt.crit=c("mse"),ic=c("aicc")),h=24))
+c1_AAN_ets <- lapply(c1_AAN_ets, "[",  c("mean"))
+
+c1_MAN_ets <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x) forecast::forecast(ets(x,model="MAN",opt.crit=c("mse"),ic=c("aicc")),h=24))
+c1_MAN_ets <- lapply(c1_MAN_ets, "[",  c("mean"))
+
+c1_MMN_ets <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x) forecast::forecast(ets(x,model="MMN",opt.crit=c("mse"),ic=c("aicc")),h=24))
+c1_MMN_ets <- lapply(c1_MMN_ets, "[",  c("mean"))
+
+c1_double_holt_additive <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x)
+  forecast::forecast( HoltWinters(x,gamma=FALSE,seasonal="additive"),h=24))
+
+c1_double_holt_additive <- lapply(c1_double_holt_additive, "[",  c("mean"))
+
+n1 <- seq(0.1, 0.99, by = .15)
+n2 <- seq(0.1, 0.99, by = .15)
+n3 <- seq(0.1, 0.99, by = .15)
+
+dat_n <- expand.grid(n1 = n1, n2= n2, n3 = n3) 
+out<- lapply(seq_len(nrow(dat_n)), function(i) {
+   c1_triple_holtwinters_additive <- lapply(list_ts_s2[1: 
+(length(list_ts_s2)/2)], function(x) 
+       forecast::forecast(HoltWinters(x,seasonal = "additive",alpha = 
+dat_n$n1[i],beta=dat_n$n2[i],gamma=dat_n$n3[i])))
+    c1_triple_holtwinters_additive <- 
+ lapply(c1_triple_holtwinters_additive, "[", "mean")
+  assign(paste0("c1_triple_holtwinters_additive", i), 
+c1_triple_holtwinters_additive, envir = .GlobalEnv)
+ c1_triple_holtwinters_additive})
+
+c1_triple_holtwinters_additive0 <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x)
+  forecast::forecast( HoltWinters(x,seasonal="additive"),h=24))
+
+c1_triple_holtwinters_additive0 <- lapply(c1_triple_holtwinters_additive0, "[",  c("mean"))
+
+n1 <- seq(0.1, 0.99, by = .15)
+n2 <- seq(0.1, 0.99, by = .15)
+n3 <- seq(0.1, 0.99, by = .15)
+
+dat_n <- expand.grid(n1 = n1, n2= n2, n3 = n3) 
+out<- lapply(seq_len(nrow(dat_n)), function(i) {
+   c1_triple_holtwinters_multiplicative <- lapply(list_ts_s2[1: 
+(length(list_ts_s2)/2)], function(x) 
+       forecast::forecast(HoltWinters(x,seasonal = "multiplicative",alpha = 
+dat_n$n1[i],beta=dat_n$n2[i],gamma=dat_n$n3[i])))
+    c1_triple_holtwinters_multiplicative <- 
+ lapply(c1_triple_holtwinters_multiplicative, "[", "mean")
+  assign(paste0("c1_triple_holtwinters_multiplicative", i), 
+c1_triple_holtwinters_multiplicative, envir = .GlobalEnv)
+ c1_triple_holtwinters_multiplicative})
+
+c1_triple_holtwinters_multiplicative0 <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x)
+  forecast::forecast( HoltWinters(x,seasonal="multiplicative"),h=24))
+
+c1_triple_holtwinters_multiplicative0 <- lapply(c1_triple_holtwinters_multiplicative0, "[",  c("mean"))
+
+c1_autoregressive_integratedmovingaverage <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x)
+  forecast::forecast( auto.arima(x,ic=c("aicc")),h=24))
+
+c1_autoregressive_integratedmovingaverage <- lapply(c1_autoregressive_integratedmovingaverage, "[",  c("mean"))
+
+
+
+# #2
+c1_autoregressive_integratedmovingaverage_1 <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x)
+  forecast::forecast( Arima(x,order=c(0,0,0)),ic=c("aicc"),h=24))
+
+c1_autoregressive_integratedmovingaverage_1 <- lapply(c1_autoregressive_integratedmovingaverage_1, "[",  c("mean"))
+
+
+#3
+c1_autoregressive_integratedmovingaverage_2 <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x)
+  forecast::forecast( Arima(x,order=c(0,0,1)),h=24))
+
+c1_autoregressive_integratedmovingaverage_2 <- lapply(c1_autoregressive_integratedmovingaverage_2, "[",  c("mean"))
+
+## 4
+
+c1_autoregressive_integratedmovingaverage_3 <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x)
+  forecast::forecast( Arima(x,order=c(0,1,1)),h=24))
+
+c1_autoregressive_integratedmovingaverage_3 <- lapply(c1_autoregressive_integratedmovingaverage_3, "[",  c("mean"))
+
+##5
+# non stationary here
+c1_autoregressive_integratedmovingaverage_4 <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x)
+  forecast::forecast( Arima(x,order=c(1,0,1)),h=24))
+
+c1_autoregressive_integratedmovingaverage_4 <- lapply(c1_autoregressive_integratedmovingaverage_4, "[",  c("mean"))
+
+
+
+
+## 19
+c1_autoregressive_integratedmovingaverage_5 <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x)
+  forecast::forecast( Arima(x,order=c(0,1,2)),h=24))
+
+c1_autoregressive_integratedmovingaverage_5 <- lapply(c1_autoregressive_integratedmovingaverage_5, "[",  c("mean"))
+
+
+
+c1_linearmodel_seasontrend <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x)
+ forecast::forecast(tslm(x~season+trend),h=24))
+
+c1_linearmodel_seasontrend <- lapply(c1_linearmodel_seasontrend, "[",  c("mean"))
+
+# tslm trend
+c1_linearmodel_trend <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x)
+ forecast::forecast(tslm(x~trend),h=24))
+
+c1_linearmodel_trend <- lapply(c1_linearmodel_trend, "[",  c("mean"))
+
+c1_cubicspline1 <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x) forecast::splinef(x,h=24,method=c("mle")))
+c1_cubicspline1 <- lapply(c1_cubicspline1, "[",  c("mean"))
+
+c1_cubicspline2 <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x) forecast::splinef(x,h=24,method=c("gcv")))
+c1_cubicspline2 <- lapply(c1_cubicspline2, "[",  c("mean"))
+
+c1_dynamicharmonicregression <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x)
+ forecast::forecast( auto.arima(x, xreg = fourier(x, K =3),seasonal=FALSE, lambda=NULL)
+                     ,xreg=forecast::fourier(x, K=3, h=24)))
+
+c1_dynamicharmonicregression <- lapply(c1_dynamicharmonicregression, "[",  c("mean"))
+
+c1_boxcoxtransform_armaerrors_trend_seasonal <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x) forecast::forecast(tbats(x),h=24))
+c1_boxcoxtransform_armaerrors_trend_seasonal <- lapply(c1_boxcoxtransform_armaerrors_trend_seasonal, "[",  c("mean"))
+
+c1_neuralnetwork1 <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x) forecast::forecast(nnetar(x,lambda="auto"),h=24))
+c1_neuralnetwork1 <- lapply(c1_neuralnetwork1, "[",  c("mean"))
+
+c1_neuralnetwork2 <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x) forecast::forecast(nnetar(x,lambda="auto",scale.inputs=TRUE),h=24))
+c1_neuralnetwork2 <- lapply(c1_neuralnetwork2, "[",  c("mean"))
+
+n1 <- list(c(0,0,0),c(0,0,1),c(0,1,1),c(1,1,1),c(1,1,0),c(1,0,0),c(1,0,3),
+            c(1,1,3), c(0,1,2),c(1,1,2),c(2,0,0),c(2,0,3),c(2,1,0),c(2.1,1),c(2,1,2)
+            ,c(2,1,3),c(2,2,2),c(2,2,3),c(3,1,0),c(3,1,1))
+
+n2 <- list(c(0,1,0),c(1,0,0),c(1,1,0),c(1,1,1),c(0,0,1),c(0,1,1),c(1,0,1))
+dat_n <- expand.grid(n1 = n1, n2 = n2)
+
+#
+out <- lapply(seq_len(nrow(dat_n)), function(i) {
+      c1_sarima <- lapply(list_ts_s2[1:(length(list_ts_s2)/2)], function(x)  {
+         tryCatch({forecast::forecast(Arima(x, order = dat_n$n1[[i]],
+           seasonal=list(order = dat_n$n2[[i]],
+           period=12)),h=24)
+           }, error = function(err) return(data.frame(mean = NA_real_))
+           
+           )})
+      
+     c1_sarima <- lapply(c1_sarima, "[", "mean")
+     c1_sarima <- lapply(c1_sarima, function(x) if(all(is.na(x))) 0 else x)
+   assign(paste0("c1_sarima", i), c1_sarima, envir = .GlobalEnv)})
+
+```
+
+```{r Export sc2}
+lst2 <- do.call(Map, c(f = cbind, mget(ls(pattern = 'c1_'))))
+
+
+export_df2 <- Map(cbind, export_df_s2, lst2)
+
+
+out <- Map(function(x, y) {x[colnames(y)] <- sapply(y,  function(u) c(rep(0, nrow(x) - length(u)), u)); x}, export_df2, lst2)
+
+export_df2 <- bind_rows(out, .id = "Date")
+
+date <- scenario2$Date
+
+export_df2$Date <- date
+
+export_df2 <- export_df2 %>% separate(product_subproduct, c("Product", "Sub.Product"), "_and_")
+
+```
+
+```{r temp}
+wow1 <- export_df1
+wow2 <- export_df2
+wed1 <- export_df1
+wed2 <- export_df2
+```
+
+
+```{r Merge SC1 and sc2}
+final_df <- rbind(export_df1,export_df2)
+ 
+final_df <- final_df[, colSums(final_df != 0) > 0]
+
+#ed1 <- export_df1
+#ed2 <- export_df2
+# remove negative values 
+#wed1<- final_df
+# negative = 0
+# wed1 = wed1[,colSums(wed1<0)<=negative]
+# 
+# 
+# wed1 <- wed1 %>%
+#  select(where(~ any(. != 0)))
+# 
+# 
+# wed2 = wed2[,colSums(wed2<0)<=negative]
+# 
+# 
+# wed2 <- wed2 %>%
+#  select(where(~ any(. != 0)))
+
+```
+
+
+```{r Export DF to csv/excel}
+
+# Change path to where you want to save
+
+#write_xlsx(export_df1,"C:\\Users\\AC91517\\OneDrive - Lumen\\Desktop\\Projects\\r scripts\\forecast_output_v2.xlsx")
+
+# csv
+
+write.csv(zzz_chrisfloat2,"C:\\Users\\AC91517\\OneDrive - Lumen\\Desktop\\Projects\\r scripts\\scenariodata.csv", row.names = FALSE)
+```
+
+```{r ODBC writing to SQL}
+con <- DBI::dbConnect(odbc::odbc(),
+              Driver   = "SQL Server",
+              Server   = "localhost\\SQLEXPRESS",
+              Database = "testdb",
+             
+              Port     = 1433)
+
+con <- DBI::dbConnect(odbc::odbc(),
+                      Driver   = "SQL Server",
+                      Server   = "usodcvsql0255",
+                      Database = "NAO_PMO_Analytics",
+                     
+                      Port     = 1433)
+
+vec <- names(final_df)[6:ncol(final_df)]
+list_after_5 <- as.list(rep("decimal(28,0)", length(vec)))
+names(list_after_5) <- vec
+
+dbWriteTable(con, "zzz_chris1.0", final_df, field.types=c(list(Date="Date",
+                       Product="varchar(255)",
+                     Sub.Product="varchar(255)",
+                     Scenario="varchar(255)",
+                      Volumes = "decimal(28,0)"),
+                 list_after_5))
+
+DBI::dbDisconnect(con)
+```
+
+
+```{r Using R to SQL RODBC}
+
+library(RODBC)
+#ctrl shift c for commenting
+
+connection <- odbcDriverConnect(
+  "Driver={SQL Server};
+   Server=usodcvsql0255;
+   Database=NAO_PMO_Analytics;
+   Trusted_connection=true;"
+)
+
+connection <- odbcDriverConnect(
+  "Driver={SQL Server};
+   Server=localhost\\SQLEXPRESS;
+   Database=testdb;
+   Trusted_connection=true;"
+)
+#list_after_5
+vec <- names(final_df)[6:ncol(final_df)]
+list_after_5 <- as.list(rep("decimal(28,0)", length(vec)))
+names(list_after_5) <- vec
+
+columnTypes <- c(list(Date="Date",
+                       Product="varchar(255)",
+                     Sub.Product="varchar(255)",
+                     Scenario="varchar(255)",
+                      Volumes = "decimal(28,0)"))
+                 
+#                      c1_simple_expo_smooth12 ="decimal(28,0)")
+         
+
+#zzz_testchris_allmodels <- export_df1
+
+zzz_chrisfloat2 <- final_df
+
+sqlSave(connection,zzz_chrisfloat2,varTypes = columnTypes)
+odbcClose(connection)
+
+
+```
+
+```{r Autoplot from SQL}
+
+ggplotly(ggplot(export_df1,aes(x=Date,y=Volumes,color=Sub.Product))+geom_point())
+
+ggplotly(ggplot(export_df1,aes(x=Date,y=export_df1$c1_sarima1,color=Sub.Product)) +
+  geom_line())
+autoplot(list_ts_s2[[3]]) + autolayer(c1_sarima4[[3]][[1]])
+
+```
+
