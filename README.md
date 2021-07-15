@@ -1,4 +1,4 @@
 # forecasting1
 
 # 7/15
-# need the ipynb file and instructions file done
+# 1) Re-create ipynb file 2) Instructions for Mik .txt
